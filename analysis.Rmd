@@ -1,0 +1,218 @@
+---
+title: "Do Unsupervised Topics Recover Human Labels? Topic Modelling of Financial Tweets"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message = FALSE, warning = FALSE)
+```
+
+## Overview
+
+This analysis asks whether topics found by unsupervised topic modelling match the categories that human annotators assigned to a set of finance-related tweets. It uses the `zeroshot/twitter-financial-news-topic` dataset (around 17,000 tweets, each manually annotated with one of 20 labels) and focuses on a subset of six labels.
+
+## Libraries
+
+```{r libraries}
+library(tidyverse)
+library(quanteda)
+library(quanteda.textplots)
+library(quanteda.textstats)
+library(quanteda.textmodels)
+library(topicmodels)
+library(plotly)
+```
+
+## 1. Pre-processing
+
+### Reading the data
+
+```{r read-data}
+df_tfn <- read_csv("data/zeroshot_twitter_financial_news_topic_recoded.csv")
+```
+
+### Selecting six categories
+
+I kept only tweets in six of the `manually_annotated_label` categories, giving a subset of 4,790 tweets.
+
+```{r filter}
+selected_labels <- c("IPO",
+                     "Analyst Update",
+                     "Stock Commentary",
+                     "Treasuries | Corporate Debt",
+                     "General News | Opinion",
+                     "Personnel Change")
+
+df_tfn <- df_tfn %>%
+  filter(manually_annotated_label %in% selected_labels)
+
+df_tfn %>% count(manually_annotated_label, sort = TRUE)
+```
+
+The categories are unbalanced: Stock Commentary and General News | Opinion make up most of the subset, while IPO has very few tweets. This matters when comparing topics with labels later on.
+
+### Building the corpus
+
+```{r corpus}
+corp_tfn <- quanteda::corpus(df_tfn, text_field = "text")
+quanteda::docnames(corp_tfn) <- df_tfn$manually_annotated_label
+
+head(summary(corp_tfn), n = 5)
+```
+
+### Tokenising and cleaning
+
+Looking at the raw tokens, I noticed punctuation, symbols, URLs, numbers and stop words. I removed these so that the corpus contains only meaningful words.
+
+```{r tokens}
+tokens_tfn <- quanteda::tokens(corp_tfn,
+                               remove_punct = TRUE,
+                               remove_url = TRUE,
+                               remove_numbers = TRUE,
+                               remove_symbols = TRUE) %>%
+  quanteda::tokens_remove(pattern = quanteda::stopwords("en"))
+
+tokens_tfn[[1]]
+```
+
+### Document-feature matrix
+
+I built the document-feature matrix and removed any tweets left with zero tokens after cleaning.
+
+```{r dfm}
+dfm_tfn <- quanteda::dfm(tokens_tfn)
+
+keep <- quanteda::ntoken(dfm_tfn) > 0
+dfm_tfn <- dfm_tfn[keep, ]
+df_tfn <- df_tfn[keep, ]
+
+dfm_tfn
+quanteda::topfeatures(dfm_tfn)
+```
+
+## 2. Topic modelling
+
+### Fitting an LDA model
+
+I ran Latent Dirichlet Allocation with k = 6, matching the six original labels, and looked at the top seven terms per topic.
+
+```{r lda}
+topicmod_lda <- topicmodels::LDA(dfm_tfn, k = 6, control = list(seed = 22))
+topicmodels::terms(topicmod_lda, 7)
+```
+
+Each tweet is then assigned to its most likely topic.
+
+```{r assign-topics}
+df_tfn$topic <- topicmodels::topics(topicmod_lda) %>% as.factor()
+```
+
+### Interpreting the topics
+
+To interpret and name the topics, I looked at the top words from the model and read a sample of tweets in each topic.
+
+```{r browse-topics}
+df_tfn %>%
+  group_by(topic) %>%
+  slice_head(n = 5) %>%
+  select(topic, text)
+```
+
+- **Topic 1 – Stock Market | Current Trends.** Trading and the current state of the stock markets (#markets, #investing, #stocks), and wider economic trends (#economy, #finance). The tweets mostly discuss which stocks are rising and which to buy or sell.
+- **Topic 2 – Management | Banks.** Information on management (chief, officer) and on banks (names, bond, debt).
+- **Topic 3 – Trade Funds.** Exchange-traded funds, especially the SPY fund, and overviews of market wires over the day or week (wires, day, next, see).
+- **Topic 4 – Recent News | UK.** New or breaking stories (new, first, years). There are some international stories, but UK news predominates.
+- **Topic 5 – Company Updates.** Company updates (company, new, ceo, year) and global investments and investors.
+- **Topic 6 – Stock Market | Bank Movement.** The stock market (market, stock) and its movements (prices, earnings, inflation), with many communications about it (says, twitter).
+
+```{r topic-names}
+topic_names <- c("1" = "Stock Market | Current Trends",
+                 "2" = "Management | Banks",
+                 "3" = "Trade Funds",
+                 "4" = "Recent News | UK",
+                 "5" = "Company Updates",
+                 "6" = "Stock Market | Bank Movement")
+
+df_tfn$topic_name <- topic_names[as.character(df_tfn$topic)]
+```
+
+### Do the topics match the original labels?
+
+The table below cross-tabulates each topic against the original labels.
+
+```{r crosstab}
+df_tfn %>%
+  count(topic_name, manually_annotated_label) %>%
+  pivot_wider(names_from = manually_annotated_label,
+              values_from = n,
+              values_fill = 0)
+```
+
+And the most common original label within each topic:
+
+```{r top-label}
+df_tfn %>%
+  count(topic_name, manually_annotated_label) %>%
+  group_by(topic_name) %>%
+  slice_max(n, n = 2) %>%
+  arrange(topic_name, desc(n))
+```
+
+- **Stock Market | Current Trends** falls mostly under *Stock Commentary*, a good match, and second under *General News | Opinion*, which loosely fits "current trends".
+- **Management | Banks** falls mostly under *General News | Opinion*, which doesn't match, but second under *Personnel Change*, which fits "management".
+- **Trade Funds** falls mostly under *Stock Commentary*, which broadly matches.
+- **Recent News | UK** falls mostly under *General News | Opinion*, a strong match.
+- **Company Updates** falls mostly under *General News | Opinion*, which doesn't match, but second under *Personnel Change*, which is a kind of company update.
+- **Stock Market | Bank Movement** falls mostly under *General News | Opinion*, a weak match, but second under *Stock Commentary*, which fits well.
+
+Looking at it from the labels' side gives a clearer picture. Some labels are concentrated in a few topics: 77% of *Stock Commentary* tweets fall into *Trade Funds* or *Stock Market | Current Trends*, 74% of *Personnel Change* tweets into *Management | Banks* or *Company Updates*, and 55% of *Analyst Update* tweets into *Stock Market | Bank Movement*. *General News | Opinion*, by contrast, is spread across every topic, and the 44 *IPO* tweets are scattered.
+
+Overall, the topics overlap only partly with the human labels. Most topics fall under either *General News | Opinion* or *Stock Commentary*, the two largest categories in the subset. Reading the General News tweets, many of them are in fact about finance and the economy, so the gap between the topics and the labels may be smaller than the table suggests. The imbalance between categories also makes it hard for the smaller labels, such as IPO, to emerge as topics of their own.
+
+## 3. Highlighting one topic
+
+I chose Topic 6, *Stock Market | Bank Movement*, and compared its vocabulary with the rest of the corpus.
+
+### Keyness plot
+
+```{r keyness}
+tstat_key <- quanteda.textstats::textstat_keyness(dfm_tfn, target = df_tfn$topic == 6)
+quanteda.textplots::textplot_keyness(tstat_key, labelsize = 2)
+```
+
+The words most distinctive of Topic 6 relative to the other topics are *earnings*, *prices*, *morgan*, *treasury* and *stanley*.
+
+### Word clouds
+
+```{r wordcloud}
+quanteda.textplots::textplot_wordcloud(tstat_key, comparison = FALSE, min_count = 1)
+```
+
+The largest words in the word cloud are *market*, *stock*, *prices*, *earnings* and *inflation*.
+
+```{r wordcloud-comparison}
+quanteda.textplots::textplot_wordcloud(tstat_key, comparison = TRUE, min_count = 1)
+```
+
+The comparison word cloud is meant to contrast words more frequent in Topic 6 with words more frequent in the rest of the corpus. Here, almost all the displayed words fall on the target side (*inflation*, *say*, *even*, *u.s*, *analyst*, *demand*), so it adds little beyond the keyness plot, which shows the reference words more clearly: the hashtags (#markets, #economy, #investing) and fund tickers (spy) that characterise other topics.
+
+## 4. 2D visualisation
+
+To see how the tweets relate to each other, I used Latent Semantic Analysis to project the documents into a lower-dimensional space and plotted the first two dimensions, coloured by topic.
+
+```{r lsa}
+df_lsa_tfn <- quanteda.textmodels::textmodel_lsa(dfm_tfn, nd = 6)$docs %>%
+  as.data.frame()
+
+df_plot <- bind_cols(df_lsa_tfn, df_tfn)
+
+plot_ly(data = df_plot,
+        x = ~V1,
+        y = ~V2,
+        color = ~topic_name,
+        type = "scatter",
+        mode = "markers",
+        text = ~paste("Label:", manually_annotated_label, "\nTweet:\n", text))
+```
+
+Most tweets cluster closely together regardless of topic, which suggests the documents are quite similar in content. I hadn't realised from reading individual tweets how concentrated the data was. The exception is *Stock Market | Current Trends*, which has a group of points spread along the first dimension, away from the main cluster; this is the topic defined by hashtags such as #finance and #trading, which suggests the first LSA dimension largely captures these hashtag-heavy tweets.
